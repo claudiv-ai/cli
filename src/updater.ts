@@ -10,13 +10,13 @@ import { logger } from './utils/logger.js';
 /**
  * Strip code blocks from response and replace with reference
  */
-export function stripCodeBlocks(response: string, hasCode: boolean): string {
+export function stripCodeBlocks(response: string, hasCode: boolean, outputFileName?: string): string {
   // Remove code blocks (```...```)
   const withoutCodeBlocks = response.replace(/```[\s\S]*?```/g, '').trim();
 
   // If there was code, add a reference
-  if (hasCode) {
-    return `${withoutCodeBlocks}\n\n→ Implementation in spec.code.html`;
+  if (hasCode && outputFileName) {
+    return `${withoutCodeBlocks}\n\n→ Implementation in ${outputFileName}`;
   }
 
   return withoutCodeBlocks;
@@ -30,7 +30,8 @@ export function updateElementWithResponse(
   element: Element,
   action: 'gen' | 'retry' | 'undo',
   response: string,
-  hasCode = false
+  hasCode = false,
+  outputFileName?: string
 ): void {
   const $element = $(element);
 
@@ -39,7 +40,7 @@ export function updateElementWithResponse(
   logger.debug(`Removed '${action}' attribute from element`);
 
   // 2. Strip code blocks and add reference if code was generated
-  const cleanResponse = stripCodeBlocks(response, hasCode);
+  const cleanResponse = stripCodeBlocks(response, hasCode, outputFileName);
 
   // 3. Add or append <ai> child element with response
   // Create new <ai> element
@@ -97,10 +98,11 @@ export async function updateSpecWithResponse(
   action: 'gen' | 'retry' | 'undo',
   response: string,
   filePath: string,
-  hasCode = false
+  hasCode = false,
+  outputFileName?: string
 ): Promise<void> {
   // Update the element: remove action attribute and add <ai> child
-  updateElementWithResponse($, element, action, response, hasCode);
+  updateElementWithResponse($, element, action, response, hasCode, outputFileName);
 
   // Serialize back to HTML
   const updatedHTML = await serializeToHTML($);

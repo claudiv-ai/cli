@@ -38,10 +38,15 @@ async function main() {
   // Create file watcher
   const watcher = new SpecFileWatcher(config);
 
+  // Start Vite dev server
+  const devServer = new DevServer();
+  await devServer.start();
+  logger.info('');
+
   // Handle file changes
   watcher.on('change', async (filePath: string) => {
     try {
-      await processSpecFile(filePath, config, claudeClient, watcher);
+      await processSpecFile(filePath, config, claudeClient, watcher, devServer);
     } catch (error) {
       const err = error as Error;
       logger.error(`Error processing ${filePath}: ${err.message}`);
@@ -58,11 +63,6 @@ async function main() {
   logger.info('💡 Tip: Add gen/retry/undo attribute to any element to trigger AI');
   logger.info('💡 Example: <create-button gen>Make a blue button</create-button>');
   logger.info('💡 Example: <my-button color="blue" size="large" gen />');
-  logger.info('');
-
-  // Start Vite dev server
-  const devServer = new DevServer();
-  await devServer.start();
   logger.info('');
 
   // Handle graceful shutdown
@@ -84,7 +84,8 @@ async function processSpecFile(
   filePath: string,
   config: any,
   claudeClient: any,
-  watcher: SpecFileWatcher
+  watcher: SpecFileWatcher,
+  devServer: DevServer
 ): Promise<void> {
   // Skip if we're updating the file ourselves
   if (watcher.isCurrentlyUpdating()) {
@@ -109,7 +110,7 @@ async function processSpecFile(
 
   // Process each chat pattern
   for (const pattern of parsed.chatPatterns) {
-    await processChatPattern(pattern, config, claudeClient, watcher, parsed.dom);
+    await processChatPattern(pattern, config, claudeClient, watcher, parsed.dom, devServer);
   }
 }
 
@@ -121,7 +122,8 @@ async function processChatPattern(
   config: any,
   claudeClient: any,
   watcher: SpecFileWatcher,
-  $: any
+  $: any,
+  devServer: DevServer
 ): Promise<void> {
   const { action, element, elementName, specAttributes, userMessage, context, elementPath } = pattern;
 
@@ -169,30 +171,29 @@ async function processChatPattern(
     let fullResponse = '';
 
     // Send to Claude and stream response
+    logger.info('Claude response:');
     for await (const chunk of claudeClient.sendPrompt(fullPrompt, context)) {
       fullResponse += chunk;
-      // Optionally: show progress
-      if (process.env.DEBUG) {
-        process.stdout.write('.');
-      }
+      // Stream output to console so user can see progress
+      process.stdout.write(chunk);
     }
 
-    if (process.env.DEBUG) {
-      process.stdout.write('\n');
-    }
-
-    logger.success('Received response from Claude');
+    process.stdout.write('\n\n');
+    logger.success('✓ Response complete');
 
     // Check if response contains code blocks
     const codeBlocks = extractCodeBlocks(fullResponse);
     const hasCode = codeBlocks.length > 0;
 
     // Generate code file using universal generator (if there's code)
+    let outputFileName: string | undefined;
+
     if (hasCode) {
       const generated = await generateCode(fullResponse, pattern, context);
 
       // Determine output file path
       const outputFile = config.specFile.replace('.cdml', generated.fileExtension);
+      outputFileName = outputFile.split('/').pop();
 
       // Write generated code
       await writeFile(outputFile, generated.code, 'utf-8');
@@ -204,12 +205,18 @@ async function processChatPattern(
       }
 
       logger.success(`Generated ${pattern.target} code → ${outputFile}`);
+
+      // Set output file on dev server and open in browser (for HTML files)
+      if (outputFileName && generated.fileExtension === '.html') {
+        devServer.setOutputFile(outputFileName);
+        await devServer.openInBrowser(outputFileName);
+      }
     }
 
     // Update spec.html: remove action attribute and add <ai> child with response
     watcher.setUpdating(true);
     try {
-      await updateSpecWithResponse($, element, action, fullResponse, config.specFile, hasCode);
+      await updateSpecWithResponse($, element, action, fullResponse, config.specFile, hasCode, outputFileName);
     } finally {
       watcher.setUpdating(false);
     }

@@ -11,6 +11,14 @@ import type { IncomingMessage, ServerResponse } from 'http';
 export class DevServer {
   private server: ViteDevServer | null = null;
   private port = 30004;
+  private outputFile: string = 'app.html'; // Default, can be configured
+
+  /**
+   * Set the output file to serve (e.g., 'test.html', 'myapp.html')
+   */
+  setOutputFile(filename: string): void {
+    this.outputFile = filename;
+  }
 
   async start(): Promise<void> {
     try {
@@ -20,20 +28,21 @@ export class DevServer {
         server: {
           port: this.port,
           strictPort: false, // Auto-increment if port is busy
-          open: true, // Open browser automatically
+          open: false, // Don't auto-open on start (we'll open after first generation)
         },
         plugins: [
           {
             name: 'spec-code-server',
-            configureServer(server: ViteDevServer) {
+            configureServer: (server: ViteDevServer) => {
+              const self = this;
               server.middlewares.use(async (req: IncomingMessage, res: ServerResponse, next: Connect.NextFunction) => {
-            // Serve generated code as the root
-            const outputFile = 'app.html'; // TODO: Make configurable
-            if (req.url === '/' || req.url === '/index.html') {
-              if (existsSync(outputFile)) {
+            // Serve generated code at its specific path
+            const requestPath = req.url?.split('?')[0]; // Remove query params
+            if (requestPath === '/' || requestPath === '/index.html' || requestPath === `/${self.outputFile}`) {
+              if (existsSync(self.outputFile)) {
                 // Read and serve the file directly
                 const { readFile } = await import('fs/promises');
-                const content = await readFile(outputFile, 'utf-8');
+                const content = await readFile(self.outputFile, 'utf-8');
                 res.statusCode = 200;
                 res.setHeader('Content-Type', 'text/html');
                 res.end(content);
@@ -122,5 +131,24 @@ export class DevServer {
 
   getPort(): number {
     return this.port;
+  }
+
+  /**
+   * Open the browser to the specific file
+   */
+  async openInBrowser(filename: string): Promise<void> {
+    const url = `http://localhost:${this.port}/${filename}`;
+    try {
+      // Use platform-specific command to open browser
+      const { spawn } = await import('child_process');
+      const command = process.platform === 'darwin' ? 'open' :
+                     process.platform === 'win32' ? 'start' : 'xdg-open';
+
+      spawn(command, [url], { detached: true, stdio: 'ignore' }).unref();
+      logger.info(`Opened ${filename} in browser`);
+    } catch (error) {
+      // If command fails, just log the URL
+      logger.info(`View at: ${url}`);
+    }
   }
 }
