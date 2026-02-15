@@ -20,7 +20,17 @@ import type { Element, AnyNode } from 'domhandler';
  * Main application entry point
  */
 async function main() {
-  logger.info('🚀 GUI-driven spec editor starting...');
+  // Check mode flags
+  const isHeadless = process.env.CLAUDIV_HEADLESS === '1';
+  const autoGen = process.env.CLAUDIV_AUTO_GEN === '1';
+  const isRetry = process.env.CLAUDIV_RETRY === '1';
+  const noOutput = process.env.CLAUDIV_NO_OUTPUT === '1';
+
+  if (isHeadless) {
+    logger.info('🚀 Claudiv - Headless generation mode');
+  } else {
+    logger.info('🚀 Claudiv - Dev server mode');
+  }
 
   // Load configuration
   const config = loadConfig();
@@ -31,10 +41,45 @@ async function main() {
   // Verify Claude is available
   await verifyClaudeAvailable(claudeClient, config.mode);
 
-  // TODO: Implement regeneration for multi-file .cdml architecture
-  // (spec.cdml, rules.cdml, models.cdml, tests.cdml)
-  // For now, generation happens on-demand through chat patterns
+  // HEADLESS MODE (gen command): Generate once and exit
+  if (isHeadless) {
+    logger.info(`Generating all from ${config.specFile.split('/').pop()}...`);
 
+    // Read and process file once
+    const content = await readFile(config.specFile, 'utf-8');
+    const parsed = parseSpecFile(content);
+
+    // Auto-generate all elements (treat as if they all have gen attribute)
+    if (autoGen) {
+      logger.info('Auto-generating all elements...');
+      // Add gen attribute to root element temporarily
+      const rootElement = parsed.dom('*').first();
+      if (rootElement.length > 0) {
+        rootElement.attr(isRetry ? 'retry' : 'gen', '');
+        // Re-parse to detect the pattern
+        const reparsed = parseSpecFile(parsed.dom.html());
+        if (reparsed.chatPatterns.length > 0) {
+          await processChatPattern(reparsed.chatPatterns[0], config, claudeClient, null, reparsed.dom, null, noOutput);
+        }
+      }
+    } else {
+      // Process only elements with gen/retry/undo attributes
+      if (parsed.chatPatterns.length === 0) {
+        logger.warn('No elements with gen/retry/undo attributes found');
+        logger.info('Tip: Run with "claudiv gen" to auto-generate all elements');
+        process.exit(0);
+      }
+
+      for (const pattern of parsed.chatPatterns) {
+        await processChatPattern(pattern, config, claudeClient, null as any, parsed.dom, null as any, noOutput);
+      }
+    }
+
+    logger.success('✓ Generation complete!');
+    process.exit(0);
+  }
+
+  // DEV MODE (dev command): Start dev server and watch
   // Create file watcher
   const watcher = new SpecFileWatcher(config);
 
@@ -43,10 +88,16 @@ async function main() {
   await devServer.start();
   logger.info('');
 
+  // Auto-generate on start if --gen or --retry flags
+  if (autoGen) {
+    logger.info(`Auto-generating on start (${isRetry ? 'retry' : 'gen'} mode)...`);
+    await processSpecFile(config.specFile, config, claudeClient, watcher, devServer, noOutput);
+  }
+
   // Handle file changes
   watcher.on('change', async (filePath: string) => {
     try {
-      await processSpecFile(filePath, config, claudeClient, watcher, devServer);
+      await processSpecFile(filePath, config, claudeClient, watcher, devServer, noOutput);
     } catch (error) {
       const err = error as Error;
       logger.error(`Error processing ${filePath}: ${err.message}`);
@@ -84,11 +135,12 @@ async function processSpecFile(
   filePath: string,
   config: any,
   claudeClient: any,
-  watcher: SpecFileWatcher,
-  devServer: DevServer
+  watcher: SpecFileWatcher | null,
+  devServer: DevServer | null,
+  noOutput: boolean = false
 ): Promise<void> {
-  // Skip if we're updating the file ourselves
-  if (watcher.isCurrentlyUpdating()) {
+  // Skip if we're updating the file ourselves (only in watch mode)
+  if (watcher && watcher.isCurrentlyUpdating()) {
     logger.debug('Skipping processing (internal update in progress)');
     return;
   }
@@ -110,7 +162,7 @@ async function processSpecFile(
 
   // Process each chat pattern
   for (const pattern of parsed.chatPatterns) {
-    await processChatPattern(pattern, config, claudeClient, watcher, parsed.dom, devServer);
+    await processChatPattern(pattern, config, claudeClient, watcher, parsed.dom, devServer, noOutput);
   }
 }
 
@@ -121,9 +173,10 @@ async function processChatPattern(
   pattern: ChatPattern,
   config: any,
   claudeClient: any,
-  watcher: SpecFileWatcher,
+  watcher: SpecFileWatcher | null,
   $: any,
-  devServer: DevServer
+  devServer: DevServer | null,
+  noOutput: boolean = false
 ): Promise<void> {
   const { action, element, elementName, specAttributes, userMessage, context, elementPath } = pattern;
 
@@ -188,7 +241,7 @@ async function processChatPattern(
     // Generate code file using universal generator (if there's code)
     let outputFileName: string | undefined;
 
-    if (hasCode) {
+    if (hasCode && !noOutput) {
       const generated = await generateCode(fullResponse, pattern, context);
 
       // Determine output file path
@@ -206,19 +259,23 @@ async function processChatPattern(
 
       logger.success(`Generated ${pattern.target} code → ${outputFile}`);
 
-      // Set output file on dev server and open in browser (for HTML files)
-      if (outputFileName && generated.fileExtension === '.html') {
+      // Set output file on dev server and open in browser (for HTML files, dev mode only)
+      if (devServer && outputFileName && generated.fileExtension === '.html') {
         devServer.setOutputFile(outputFileName);
         await devServer.openInBrowser(outputFileName);
       }
+    } else if (hasCode && noOutput) {
+      logger.info('Code generated but not written (--no-output mode)');
     }
 
-    // Update spec.html: remove action attribute and add <ai> child with response
-    watcher.setUpdating(true);
-    try {
-      await updateSpecWithResponse($, element, action, fullResponse, config.specFile, hasCode, outputFileName);
-    } finally {
-      watcher.setUpdating(false);
+    // Update spec.html: remove action attribute and add <ai> child with response (watch mode only)
+    if (watcher) {
+      watcher.setUpdating(true);
+      try {
+        await updateSpecWithResponse($, element, action, fullResponse, config.specFile, hasCode, outputFileName);
+      } finally {
+        watcher.setUpdating(false);
+      }
     }
 
   } catch (error) {

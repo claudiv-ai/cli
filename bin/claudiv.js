@@ -44,6 +44,10 @@ for (let i = 0; i < args.length; i++) {
     flags.watch = true;
   } else if (arg === '-o' || arg === '--output') {
     flags.output = args[++i];
+  } else if (arg === '--retry') {
+    flags.retry = true;
+  } else if (arg === '--no-output') {
+    flags.noOutput = true;
   } else if (arg === '--dry-run') {
     flags.dryRun = true;
   } else if (arg === '-v' || arg === '--version') {
@@ -66,6 +70,9 @@ switch (positional[0]) {
   case 'gen':
     cmdGen(positional[1], flags);
     break;
+  case 'dev':
+    cmdDev(positional[1], flags);
+    break;
   case 'reverse':
     cmdReverse(positional[1], flags);
     break;
@@ -76,13 +83,13 @@ switch (positional[0]) {
     showHelp();
     break;
   case undefined:
-    // No command: look for .cdml in current directory and watch
+    // No command: look for .cdml in current directory and start dev mode
     cmdDefault(flags);
     break;
   default:
     // Check if it's a .cdml file path
     if (positional[0].endsWith('.cdml')) {
-      cmdGen(positional[0], flags);
+      cmdDev(positional[0], flags);
     } else {
       console.error(`Unknown command: ${positional[0]}`);
       console.log('Run "claudiv help" for usage information.');
@@ -143,14 +150,16 @@ function cmdNew(name, flags) {
 }
 
 /**
- * claudiv gen <name> [-t|--target <component>] [-w|--watch] [-o|--output <file>]
+ * claudiv gen <name> [-t|--target <component>] [-o|--output <file>]
+ *
+ * Generate code headlessly (no dev server, no watch, one-time generation)
+ * Automatically generates ALL elements (no need for gen attributes)
  *
  * Examples:
- *   claudiv gen myapp                    # generate all from myapp.cdml
+ *   claudiv gen myapp                    # generate all from myapp.cdml (headless)
  *   claudiv gen myapp -t config          # generate config component only
  *   claudiv gen txt2img -t config        # generate txt2img.config
  *   claudiv gen myapp.cdml               # explicit .cdml path
- *   claudiv gen myapp -w                 # generate + watch for changes
  *   claudiv gen myapp -o output.py       # generate to specific file
  */
 function cmdGen(name, flags) {
@@ -158,10 +167,9 @@ function cmdGen(name, flags) {
     console.error('Usage: claudiv gen <name> [options]');
     console.log('');
     console.log('Examples:');
-    console.log('  claudiv gen myapp');
-    console.log('  claudiv gen myapp -t config');
-    console.log('  claudiv gen myapp -w');
-    console.log('  claudiv gen myapp -o output.py');
+    console.log('  claudiv gen myapp                 # headless generation');
+    console.log('  claudiv gen myapp -t config       # generate specific target');
+    console.log('  claudiv gen myapp -o output.py    # custom output file');
     process.exit(1);
   }
 
@@ -175,11 +183,60 @@ function cmdGen(name, flags) {
     process.exit(1);
   }
 
-  // If -t flag, it selects a component/target within the .cdml
-  if (flags.target) {
-    console.log(`Generating "${flags.target}" from ${cdmlFile}...`);
-  } else {
-    console.log(`Generating from ${cdmlFile}...`);
+  console.log(`Generating all from ${cdmlFile} (headless mode)...`);
+
+  // Set headless mode flags
+  flags.headless = true;  // No dev server
+  flags.autoGen = true;   // Auto-generate all elements
+  flags.watch = false;    // No watch mode
+
+  startEngine(cdmlPath, flags);
+}
+
+/**
+ * claudiv dev <name> [--gen|--retry] [--no-output]
+ *
+ * Start dev server with HMR and watch mode
+ * Optionally generate on start with --gen or --retry flags
+ *
+ * Examples:
+ *   claudiv dev myapp                    # dev server + watch (no auto-gen)
+ *   claudiv dev myapp --gen              # dev server + watch + auto-generate on start
+ *   claudiv dev myapp --retry            # dev server + watch + retry generation
+ *   claudiv dev myapp --no-output        # dev server but don't write output files
+ */
+function cmdDev(name, flags) {
+  if (!name) {
+    console.error('Usage: claudiv dev <name> [options]');
+    console.log('');
+    console.log('Examples:');
+    console.log('  claudiv dev myapp                 # dev server + watch');
+    console.log('  claudiv dev myapp --gen           # dev server + auto-generate');
+    console.log('  claudiv dev myapp --retry         # dev server + retry');
+    console.log('  claudiv dev myapp --no-output     # dev server without writing files');
+    process.exit(1);
+  }
+
+  // Resolve .cdml file
+  const cdmlFile = name.endsWith('.cdml') ? name : `${name}.cdml`;
+  const cdmlPath = join(process.cwd(), cdmlFile);
+
+  if (!existsSync(cdmlPath)) {
+    console.error(`File not found: ${cdmlFile}`);
+    console.log(`Create it with: claudiv new ${name}`);
+    process.exit(1);
+  }
+
+  console.log(`Starting dev server for ${cdmlFile}...`);
+
+  // Set dev mode flags
+  flags.headless = false;  // Enable dev server
+  flags.watch = true;      // Enable watch mode
+
+  // Auto-generate on start if --gen or --retry flags are present
+  if (flags.gen || flags.retry) {
+    flags.autoGen = true;
+    console.log(`Will ${flags.retry ? 'retry' : 'generate'} on start`);
   }
 
   startEngine(cdmlPath, flags);
@@ -283,9 +340,14 @@ function startEngine(cdmlPath, flags) {
   const mode = process.env.MODE || 'cli';
   const envVars = { ...process.env, MODE: mode };
 
+  // Pass flags as environment variables
   if (flags.target) envVars.CLAUDIV_TARGET = flags.target;
   if (flags.output) envVars.CLAUDIV_OUTPUT = flags.output;
   if (flags.watch) envVars.CLAUDIV_WATCH = '1';
+  if (flags.headless) envVars.CLAUDIV_HEADLESS = '1';
+  if (flags.autoGen) envVars.CLAUDIV_AUTO_GEN = '1';
+  if (flags.retry) envVars.CLAUDIV_RETRY = '1';
+  if (flags.noOutput) envVars.CLAUDIV_NO_OUTPUT = '1';
 
   const editor = spawn('node', [join(__dirname, '../dist/index.js'), cdmlPath], {
     stdio: 'inherit',
