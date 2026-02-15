@@ -4,7 +4,7 @@
 
 import dotenv from 'dotenv';
 import { existsSync, readdirSync } from 'fs';
-import { join } from 'path';
+import { join, isAbsolute } from 'path';
 import { logger } from './utils/logger.js';
 import type { Config } from '@claudiv/core';
 
@@ -40,9 +40,10 @@ export function loadConfig(): Config {
   let specFile: string;
 
   if (cliFile) {
-    specFile = join(process.cwd(), cliFile);
+    // If path is already absolute, use it directly; otherwise join with cwd
+    specFile = isAbsolute(cliFile) ? cliFile : join(process.cwd(), cliFile);
     if (!existsSync(specFile)) {
-      logger.error(`File not found: ${cliFile}`);
+      logger.error(`File not found: ${specFile}`);
       process.exit(1);
     }
   } else {
