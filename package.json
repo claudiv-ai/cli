@@ -1,6 +1,6 @@
 {
   "name": "@claudiv/cli",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Claude in a Div — Universal Declarative Generation Platform",
   "main": "dist/index.js",
   "type": "module",
