@@ -24,7 +24,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@claudiv/core": "workspace:*",
+    "@claudiv/core": "^0.1.0",
     "@anthropic-ai/sdk": "^0.32.1",
     "cheerio": "^1.0.0",
     "chokidar": "^5.0.0",
@@ -44,8 +44,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/claudiv-ai/claudiv.git",
-    "directory": "packages/cli"
+    "url": "git+https://github.com/claudiv-ai/cli.git"
   },
   "keywords": [
     "claudiv",

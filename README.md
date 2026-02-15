@@ -1,10 +1,12 @@
-# Claudiv
+# @claudiv/cli
 
-### *Claude in a Div*
+### *Claude in a Div - CLI Tool*
 
-> **Conversational UI Development with Claude** - Build web applications by describing what you want, not how to code it.
+> **Conversational Development with Claude** - Build applications by describing what you want in CDML
 
-**Claudiv** is a revolutionary development framework that transforms XML-like specifications into working web applications through natural conversations with Claude AI. Instead of writing code, you describe your UI in simple, freeform tags and let Claude handle the implementation.
+**@claudiv/cli** is the command-line tool for the Claudiv platform. It watches `.cdml` (Claudiv Markup Language) files, generates code through conversations with Claude AI, and provides a development server with hot reload.
+
+**Powered by [@claudiv/core](https://npmjs.com/package/@claudiv/core)** - The pure generation engine
 
 ## ✨ What Makes Claudiv Special
 
@@ -19,25 +21,29 @@
 ## 🚀 Quick Start
 
 ```bash
-# Install
-npm install -g claudiv
+# Install globally
+npm install -g @claudiv/cli
 
-# Create a spec.html file
-echo '<app><button gen="">Make a blue button</button></app>' > spec.html
+# Create a .cdml file
+mkdir claudiv
+echo '<app><button gen>Make a blue button</button></app>' > claudiv/app.cdml
 
 # Start development
 claudiv
 ```
 
-Your browser opens at `http://localhost:30006` with a working blue button. **That's it.**
+Your browser opens at `http://localhost:30004` with a working blue button. **That's it.**
 
 ## 💡 How It Works
 
-### 1. Write Specifications, Not Code
+### 1. Write CDML Specifications
+
+Create `.cdml` files with declarative markup:
 
 ```xml
-<app>
-  <hero-section gen="">
+<!-- claudiv/app.cdml -->
+<app target="html">
+  <hero-section gen>
     Create a hero section with gradient background,
     large heading "Welcome to the Future",
     and a call-to-action button
@@ -47,17 +53,25 @@ Your browser opens at `http://localhost:30006` with a working blue button. **Tha
 
 ### 2. Claude Generates Implementation
 
-Claudiv sends your specification to Claude, which generates complete HTML/CSS code and updates your browser automatically.
+Claudiv sends your specification to Claude (via CLI subscription or API), which generates complete code and updates your browser automatically.
+
+Generated artifacts:
+- `app.html` - Final HTML/CSS implementation
+- `app.spec.cdml` - Structured specification
+- `app.rules.cdml` - Extracted rules and conventions
+- `app.models.cdml` - Data models and entities
+- `app.tests.cdml` - Test specifications
 
 ### 3. Iterate Naturally
 
 ```xml
-<app>
-  <hero-section lock="">
+<!-- claudiv/app.cdml -->
+<app target="html">
+  <hero-section lock>
     <!-- Already perfect, keep this -->
   </hero-section>
 
-  <features-grid gen="">
+  <features-grid gen>
     Add a 3-column grid showcasing key features
     with icons and descriptions
   </features-grid>
@@ -153,35 +167,76 @@ Perfect for iterative development:
 
 ## 📚 Documentation
 
-- **[Getting Started Guide](FEATURES-SUMMARY.md)** - Complete feature overview
-- **[Attribute Syntax](ATTRIBUTE-SYNTAX.md)** - Full syntax reference
-- **[Lock/Unlock Guide](LOCK-UNLOCK-GUIDE.md)** - Selective regeneration patterns
-- **[Schema Guide](SCHEMA-GUIDE.md)** - IDE autocomplete setup
+- **[Getting Started Guide](../../docs/FEATURES-SUMMARY.md)** - Complete feature overview
+- **[Attribute Syntax](../../docs/ATTRIBUTE-SYNTAX.md)** - Full syntax reference
+- **[Lock/Unlock Guide](../../docs/LOCK-UNLOCK-GUIDE.md)** - Selective regeneration patterns
+- **[CDML Schema Guide](../../docs/SCHEMA-GUIDE.md)** - IDE autocomplete setup
+- **[Core API Documentation](https://npmjs.com/package/@claudiv/core)** - @claudiv/core reference
 
 ## ⚙️ Configuration
 
-### Two Modes Available
+### Configuration File
+
+Create `claudiv.json` in your project root:
+
+```json
+{
+  "mode": "cli",
+  "specFile": "claudiv/app.cdml",
+  "outputDir": "src/generated",
+  "target": "html"
+}
+```
+
+### Two Generation Modes
 
 **CLI Mode** (uses Claude Code subscription):
 ```bash
+# Set in claudiv.json
+{ "mode": "cli" }
+
+# Or via environment variable
 MODE=cli claudiv
 ```
 
-**API Mode** (pay-per-use):
+**API Mode** (pay-per-use via Anthropic API):
 ```env
-# .env file
+# .claudiv/.env file
 MODE=api
-ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_API_KEY=sk-ant-api03-...
+```
+
+### Project Structure
+
+```
+my-project/
+├── claudiv/               # CDML source files (version controlled)
+│   ├── app.cdml          # Main specification
+│   ├── app.spec.cdml     # Generated structured spec
+│   ├── app.rules.cdml    # Generated rules
+│   ├── app.models.cdml   # Generated data models
+│   └── app.tests.cdml    # Generated tests
+│
+├── src/generated/        # Generated code (gitignored)
+│   └── app.html
+│
+├── .claudiv/             # Metadata (gitignored)
+│   ├── .env              # API keys
+│   ├── cache/
+│   └── logs/
+│
+├── claudiv.json          # Configuration
+└── .gitignore
 ```
 
 ### IDE Support
 
 Install the **Red Hat XML** extension in VS Code for:
-- Autocomplete for all attributes
+- Autocomplete for CDML attributes
 - Documentation on hover
 - Real-time validation
 
-See [SCHEMA-GUIDE.md](SCHEMA-GUIDE.md) for setup instructions.
+See [SCHEMA-GUIDE.md](../../docs/SCHEMA-GUIDE.md) for setup instructions.
 
 ## 🔥 Advanced Features
 
@@ -260,27 +315,41 @@ spec.html serves as both specification and documentation.
 ## 🛠️ Commands
 
 ```bash
-# Development mode (with hot reload)
+# Watch mode with dev server (default)
 claudiv
-# or
-npm run dev
 
-# Build TypeScript
-npm run build
+# Generate once (no watching)
+claudiv gen
 
-# CLI mode explicitly
-npm run dev:cli
+# Specify file explicitly
+claudiv --file claudiv/app.cdml
 
-# API mode explicitly
-npm run dev:api
+# Use API mode
+claudiv --mode api
+
+# Show help
+claudiv --help
 ```
 
-## 📦 What Gets Generated
+## 📦 Generated Artifacts
 
-- **spec.html** - Your specifications (edit this)
-- **spec.code.html** - Generated HTML/CSS (browser-ready)
-- **spec.xsd** - XML Schema for IDE autocomplete
-- **.vscode/settings.json** - IDE configuration
+When you run Claudiv, multiple files are generated from your `.cdml` source:
+
+**Input:**
+- `claudiv/app.cdml` - Your source specification (version controlled)
+
+**Generated Artifacts:** (all gitignored)
+- `app.html` - Final HTML/CSS implementation (browser-ready)
+- `app.spec.cdml` - Structured specification for tracking
+- `app.rules.cdml` - Extracted rules and conventions
+- `app.models.cdml` - Data models and business entities
+- `app.tests.cdml` - Test specifications
+- `.claudiv/cache/` - Generation cache
+- `.claudiv/logs/` - Execution logs
+
+**IDE Support:**
+- `claudiv.xsd` - XML Schema for autocomplete (auto-generated)
+- `.vscode/settings.json` - IDE configuration
 
 ## 🌟 Why Claudiv?
 
@@ -296,19 +365,63 @@ Traditional development:
 1. Describe what you want
 2. ✨ *Everything else happens automatically*
 
+## Architecture
+
+@claudiv/cli is built on top of [@claudiv/core](https://npmjs.com/package/@claudiv/core):
+
+- **@claudiv/core** - Pure generation engine (framework-agnostic)
+- **@claudiv/cli** - File watching, Claude integration, dev server
+- **Chokidar** - Cross-platform file watching
+- **Anthropic SDK** - API mode integration
+
+The CLI handles I/O while @claudiv/core handles generation logic. This separation enables reuse in build plugins, VS Code extensions, and other integrations.
+
+## Installation
+
+### Global Installation
+
+```bash
+npm install -g @claudiv/cli
+```
+
+### Local Project Installation
+
+```bash
+npm install --save-dev @claudiv/cli
+```
+
+Add to `package.json` scripts:
+```json
+{
+  "scripts": {
+    "dev": "claudiv",
+    "gen": "claudiv gen"
+  }
+}
+```
+
 ## 🤝 Contributing
 
-Claudiv is open source and welcomes contributions!
+Contributions are welcome! Please see [CONTRIBUTING.md](../../CONTRIBUTING.md) for guidelines.
 
 ## 📄 License
 
-MIT License - see LICENSE file for details
+MIT © 2026 Amir Guterman
+
+See [LICENSE](./LICENSE) for details.
 
 ## 🔗 Links
 
-- **GitHub**: [claudiv](https://github.com/claudiv-ai/claudiv)
-- **Documentation**: [Full docs](FEATURES-SUMMARY.md)
-- **Claude Code**: [https://code.claude.com](https://code.claude.com)
+- **Homepage:** [https://claudiv.org](https://claudiv.org)
+- **GitHub:** [https://github.com/claudiv-ai/cli](https://github.com/claudiv-ai/cli)
+- **npm:** [https://npmjs.com/package/@claudiv/cli](https://npmjs.com/package/@claudiv/cli)
+- **Documentation:** [https://docs.claudiv.org](https://docs.claudiv.org)
+- **Claude Code:** [https://claude.ai/code](https://claude.ai/code)
+
+## Related Packages
+
+- [@claudiv/core](https://npmjs.com/package/@claudiv/core) - Core generation engine
+- [@claudiv/vite-sdk](https://npmjs.com/package/@claudiv/vite-sdk) - Vite plugin with HMR
 
 ---
 
