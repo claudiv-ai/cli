@@ -1,4 +1,3 @@
-<?xml version="1.0" encoding="UTF-8"?>
 <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" elementFormDefault="qualified">
 
   <!-- Global action attributes that can be added to ANY element -->
@@ -44,20 +43,6 @@
           <xs:documentation>Application theme (e.g., "dark", "light")</xs:documentation>
         </xs:annotation>
       </xs:attribute>
-      <xs:attributeGroup ref="actionAttributes"/>
-      <xs:anyAttribute processContents="lax"/>
-    </xs:complexType>
-  </xs:element>
-
-  <!-- Chat element: DEPRECATED - use gen/retry/undo attributes instead -->
-  <xs:element name="chat">
-    <xs:annotation>
-      <xs:documentation>DEPRECATED: Chat wrapper is no longer needed. Use gen/retry/undo attributes directly on elements instead.</xs:documentation>
-    </xs:annotation>
-    <xs:complexType>
-      <xs:sequence>
-        <xs:any minOccurs="0" maxOccurs="unbounded" processContents="lax"/>
-      </xs:sequence>
       <xs:attributeGroup ref="actionAttributes"/>
       <xs:anyAttribute processContents="lax"/>
     </xs:complexType>
@@ -333,7 +318,7 @@
     - Content (text + nested elements) provides additional description
     - gen/retry/undo attributes trigger actions and are removed after processing
     - AI responses are added as <ai> children with structured XML
-    - No <chat> wrapper needed - just add gen/retry/undo directly to elements!
+    - Just add gen/retry/undo directly to elements!
 
     AFTER PROCESSING:
     ================

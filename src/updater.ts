@@ -1,117 +1,106 @@
 /**
- * XML-ish updater - inserts AI responses into spec.html
+ * Transactional updater — handles atomic updates to context manifest and generated files.
+ *
+ * Each Claudiv operation is a transaction:
+ * 1. Write generated files
+ * 2. Update context.cdml refs
+ * 3. Record facts from plan decisions
+ * 4. Update .cdml cache
+ *
+ * On failure: rollback (no partial state).
  */
 
-import { writeFile } from 'fs/promises';
-import type { CheerioAPI } from 'cheerio';
-import type { Element } from 'domhandler';
+import { writeFile, readFile, unlink } from 'fs/promises';
+import { existsSync } from 'fs';
+import { join } from 'path';
+import type { ContextManifest, ContextRef, ContextFact } from '@claudiv/core';
+import { serializeContextManifest } from '@claudiv/core';
 import { logger } from './utils/logger.js';
 
-/**
- * Strip code blocks from response and replace with reference
- */
-export function stripCodeBlocks(response: string, hasCode: boolean, outputFileName?: string): string {
-  // Remove code blocks (```...```)
-  const withoutCodeBlocks = response.replace(/```[\s\S]*?```/g, '').trim();
-
-  // If there was code, add a reference
-  if (hasCode && outputFileName) {
-    return `${withoutCodeBlocks}\n\n→ Implementation in ${outputFileName}`;
-  }
-
-  return withoutCodeBlocks;
+export interface TransactionOp {
+  type: 'write' | 'delete';
+  file: string;
+  content?: string;
+  previousContent?: string;
 }
 
 /**
- * Update element with AI response: remove action attribute and add/update <ai> child
+ * Execute a transaction: write files and update context atomically.
  */
-export function updateElementWithResponse(
-  $: CheerioAPI,
-  element: Element,
-  action: 'gen' | 'retry' | 'undo',
-  response: string,
-  hasCode = false,
-  outputFileName?: string
-): void {
-  const $element = $(element);
-
-  // 1. Remove the action attribute (gen/retry/undo)
-  $element.removeAttr(action);
-  logger.debug(`Removed '${action}' attribute from element`);
-
-  // 2. Strip code blocks and add reference if code was generated
-  const cleanResponse = stripCodeBlocks(response, hasCode, outputFileName);
-
-  // 3. Add or append <ai> child element with response
-  // Create new <ai> element
-  const aiElement = $('<ai></ai>');
-  aiElement.html(cleanResponse);
-
-  // Append to element
-  $element.append(aiElement);
-
-  logger.debug('Added <ai> element with response as child');
-}
-
-/**
- * Serialize cheerio DOM back to HTML string
- */
-export async function serializeToHTML($: CheerioAPI): Promise<string> {
-  // Use $.html() to serialize the entire document
-  const html = $.html();
-
-  // Format with prettier for consistent indentation (disabled for now)
-  // TODO: Add prettier as optional dependency for better formatting
-  return html;
-}
-
-/**
- * Write updated content back to spec.html safely
- */
-export async function writeSpecFile(
-  filePath: string,
-  content: string
+export async function executeTransaction(
+  ops: TransactionOp[],
+  contextManifest: ContextManifest,
+  contextPath: string,
+  newRefs: ContextRef[],
+  newFacts: ContextFact[],
+  scopePath: string
 ): Promise<void> {
+  const completed: TransactionOp[] = [];
+
   try {
-    await writeFile(filePath, content, 'utf-8');
-    logger.debug(`Wrote updated content to ${filePath}`);
+    // 1. Write/delete generated files
+    for (const op of ops) {
+      if (op.type === 'write' && op.content !== undefined) {
+        // Save previous content for rollback
+        if (existsSync(op.file)) {
+          op.previousContent = await readFile(op.file, 'utf-8');
+        }
+        await writeFile(op.file, op.content, 'utf-8');
+        completed.push(op);
+        logger.debug(`Wrote: ${op.file}`);
+      } else if (op.type === 'delete') {
+        if (existsSync(op.file)) {
+          op.previousContent = await readFile(op.file, 'utf-8');
+          await unlink(op.file);
+          completed.push(op);
+          logger.debug(`Deleted: ${op.file}`);
+        }
+      }
+    }
+
+    // 2. Update context manifest refs
+    const scope = contextManifest.scopes.find((s: { path: string }) => s.path === scopePath);
+    if (scope) {
+      for (const ref of newRefs) {
+        const existing = scope.refs.findIndex((r: ContextRef) => r.file === ref.file);
+        if (existing >= 0) {
+          scope.refs[existing] = ref;
+        } else {
+          scope.refs.push(ref);
+        }
+      }
+    }
+
+    // 3. Record new facts
+    if (newFacts.length > 0) {
+      const targetScope = scope || contextManifest.global;
+      if ('facts' in targetScope) {
+        targetScope.facts.push(...newFacts);
+      }
+    }
+
+    // 4. Write updated context manifest
+    await writeFile(contextPath, serializeContextManifest(contextManifest), 'utf-8');
+
   } catch (error) {
-    const err = error as Error;
-    logger.error(`Failed to write ${filePath}: ${err.message}`);
+    // ROLLBACK: restore all completed operations
+    logger.error(`Transaction failed, rolling back ${completed.length} operation(s)`);
+
+    for (const op of completed.reverse()) {
+      try {
+        if (op.type === 'write' && op.previousContent !== undefined) {
+          await writeFile(op.file, op.previousContent, 'utf-8');
+        } else if (op.type === 'write' && op.previousContent === undefined) {
+          // File was newly created — delete it
+          if (existsSync(op.file)) await unlink(op.file);
+        } else if (op.type === 'delete' && op.previousContent !== undefined) {
+          await writeFile(op.file, op.previousContent, 'utf-8');
+        }
+      } catch (rollbackError) {
+        logger.error(`Rollback failed for ${op.file}: ${(rollbackError as Error).message}`);
+      }
+    }
+
     throw error;
   }
-}
-
-/**
- * Grace period to prevent immediate re-trigger of watcher
- */
-export function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Complete update flow: remove action attribute, add AI response, serialize, write file
- */
-export async function updateSpecWithResponse(
-  $: CheerioAPI,
-  element: Element,
-  action: 'gen' | 'retry' | 'undo',
-  response: string,
-  filePath: string,
-  hasCode = false,
-  outputFileName?: string
-): Promise<void> {
-  // Update the element: remove action attribute and add <ai> child
-  updateElementWithResponse($, element, action, response, hasCode, outputFileName);
-
-  // Serialize back to HTML
-  const updatedHTML = await serializeToHTML($);
-
-  // Write to file
-  await writeSpecFile(filePath, updatedHTML);
-
-  // Grace period to prevent circular trigger
-  await sleep(500);
-
-  logger.success('Updated spec.html with AI response');
 }

@@ -1,92 +1,76 @@
 /**
  * Anthropic API integration for direct API access
  */
-
 import Anthropic from '@anthropic-ai/sdk';
 import { logger } from './utils/logger.js';
-import type { HierarchyContext } from '@claudiv/core';
 import { buildPromptContext } from '@claudiv/core';
-
 export class ClaudeAPIClient {
-  private client: Anthropic;
-
-  constructor(apiKey: string) {
-    this.client = new Anthropic({
-      apiKey,
-    });
-  }
-
-  /**
-   * Send prompt to Claude API and stream response
-   */
-  async *sendPrompt(
-    userMessage: string,
-    context: HierarchyContext
-  ): AsyncGenerator<string> {
-    logger.processing('Sending request to Claude API...');
-
-    // Build system prompt with hierarchy context
-    const systemPrompt = this.buildSystemPrompt(context);
-
-    try {
-      // Stream from API
-      const stream = await this.client.messages.stream({
-        model: 'claude-opus-4-6',
-        max_tokens: 4096,
-        system: systemPrompt,
-        messages: [
-          {
-            role: 'user',
-            content: userMessage,
-          },
-        ],
-      });
-
-      let chunkCount = 0;
-
-      for await (const chunk of stream) {
-        if (
-          chunk.type === 'content_block_delta' &&
-          chunk.delta.type === 'text_delta'
-        ) {
-          chunkCount++;
-          yield chunk.delta.text;
+    client;
+    constructor(apiKey) {
+        this.client = new Anthropic({
+            apiKey,
+        });
+    }
+    /**
+     * Send prompt to Claude API and stream response
+     */
+    async *sendPrompt(userMessage, context) {
+        logger.processing('Sending request to Claude API...');
+        // Build system prompt with hierarchy context
+        const systemPrompt = this.buildSystemPrompt(context);
+        try {
+            // Stream from API
+            const stream = await this.client.messages.stream({
+                model: 'claude-opus-4-6',
+                max_tokens: 4096,
+                system: systemPrompt,
+                messages: [
+                    {
+                        role: 'user',
+                        content: userMessage,
+                    },
+                ],
+            });
+            let chunkCount = 0;
+            for await (const chunk of stream) {
+                if (chunk.type === 'content_block_delta' &&
+                    chunk.delta.type === 'text_delta') {
+                    chunkCount++;
+                    yield chunk.delta.text;
+                }
+            }
+            logger.debug(`Received ${chunkCount} chunks from API`);
         }
-      }
-
-      logger.debug(`Received ${chunkCount} chunks from API`);
-    } catch (error) {
-      const err = error as Error;
-      logger.error(`Claude API error: ${err.message}`);
-      throw error;
+        catch (error) {
+            const err = error;
+            logger.error(`Claude API error: ${err.message}`);
+            throw error;
+        }
     }
-  }
-
-  /**
-   * Check if API is available
-   */
-  async checkAvailable(): Promise<boolean> {
-    try {
-      // Test with a minimal request
-      await this.client.messages.create({
-        model: 'claude-opus-4-6',
-        max_tokens: 10,
-        messages: [{ role: 'user', content: 'test' }],
-      });
-      return true;
-    } catch (error) {
-      logger.error('Claude API not available');
-      return false;
+    /**
+     * Check if API is available
+     */
+    async checkAvailable() {
+        try {
+            // Test with a minimal request
+            await this.client.messages.create({
+                model: 'claude-opus-4-6',
+                max_tokens: 10,
+                messages: [{ role: 'user', content: 'test' }],
+            });
+            return true;
+        }
+        catch (error) {
+            logger.error('Claude API not available');
+            return false;
+        }
     }
-  }
-
-  /**
-   * Build system prompt with context
-   */
-  private buildSystemPrompt(context: HierarchyContext): string {
-    const contextStr = buildPromptContext(context);
-
-    return `You are an AI assistant helping generate HTML/CSS code from natural language requests.
+    /**
+     * Build system prompt with context
+     */
+    buildSystemPrompt(context) {
+        const contextStr = buildPromptContext(context);
+        return `You are an AI assistant helping generate HTML/CSS code from natural language requests.
 
 ${contextStr}
 
@@ -129,5 +113,5 @@ IMPORTANT:
 - Still include code blocks with \`\`\`html and \`\`\`css for implementation
 - EVERY nested component must be fully implemented, not just mentioned in comments
 `;
-  }
+    }
 }

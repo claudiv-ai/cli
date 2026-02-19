@@ -1,466 +1,476 @@
 /**
- * Main orchestrator for GUI-driven spec editor
+ * Claudiv CLI engine — diff-based, transactional processing model.
+ *
+ * No gen/retry/undo attributes. Changes detected by diffing cached vs current.
+ *
+ * Flow:
+ *   .cdml file change detected
+ *     ↓
+ *   diffCdml(cached, current) → CdmlDiffResult
+ *     ↓
+ *   Classify: plan directives | plan answers | content changes
+ *     ↓
+ *   For each change → BEGIN TRANSACTION:
+ *     1. Resolve scope from .claudiv/context.cdml
+ *     2. Resolve dependencies → view-filtered facets
+ *     3. Read current code from <refs>
+ *     4. Assemble prompt: target + current + contracts + facts
+ *     5. Execute headless Claude
+ *     6. Validate: response only affects target scope
+ *     7. COMMIT or ROLLBACK
  */
 
-import { readFile, writeFile, chmod } from 'fs/promises';
+import { readFile, writeFile, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
-import { join } from 'path';
+import { join, dirname, basename } from 'path';
+import chokidar from 'chokidar';
+import {
+  diffCdml,
+  getChangedElements,
+  assembleContext,
+  parseContextManifest,
+  loadContextManifest,
+  serializeContextManifest,
+  executeClaudeHeadless,
+  loadProject,
+  parseSpecFile,
+  detectPlanDirectives,
+  parsePlanQuestions,
+  allQuestionsAnswered,
+  questionsToFacts,
+  buildPlanPrompt,
+  generatePlanQuestions,
+} from '@claudiv/core';
+import type {
+  ContextManifest,
+  ProjectRegistry,
+  CdmlElementChange,
+  PlanDirective,
+} from '@claudiv/core';
+import type { ParsedCdml } from '@claudiv/core';
 import { loadConfig } from './config.js';
 import { logger } from './utils/logger.js';
-import { SpecFileWatcher } from './watcher.js';
-import { parseSpecFile, generateCode, extractCodeBlocks } from '@claudiv/core';
-import type { ChatPattern } from '@claudiv/core';
-import { createClaudeClient, verifyClaudeAvailable } from './claude-client.js';
-import { updateSpecWithResponse } from './updater.js';
-import { DevServer } from './dev-server.js';
-import * as cheerio from 'cheerio';
-import type { Element, AnyNode } from 'domhandler';
+import { parseSystemCdml, createSystemComponents } from './system-manager.js';
 
-/**
- * Main application entry point
- */
+/** In-memory CDML cache for diff detection */
+const cache = new Map<string, string>();
+
 async function main() {
-  // Check mode flags
+  const isWatch = process.env.CLAUDIV_WATCH === '1';
   const isHeadless = process.env.CLAUDIV_HEADLESS === '1';
-  const autoGen = process.env.CLAUDIV_AUTO_GEN === '1';
-  const isRetry = process.env.CLAUDIV_RETRY === '1';
-  const noOutput = process.env.CLAUDIV_NO_OUTPUT === '1';
+  const isInit = process.env.CLAUDIV_INIT === '1';
+  const isDryRun = process.env.CLAUDIV_DRY_RUN === '1';
+  const scopeFilter = process.env.CLAUDIV_SCOPE;
 
-  if (isHeadless) {
-    logger.info('🚀 Claudiv - Headless generation mode');
-  } else {
-    logger.info('🚀 Claudiv - Dev server mode');
-  }
+  logger.info('Claudiv — Declarative AI Interaction Platform');
 
-  // Load configuration
   const config = loadConfig();
+  const projectRoot = dirname(config.specFile);
 
-  // Create Claude client
-  const claudeClient = createClaudeClient(config);
+  // Initialize mode
+  if (isInit) {
+    await handleInit(projectRoot);
+    process.exit(0);
+  }
 
-  // Verify Claude is available
-  await verifyClaudeAvailable(claudeClient, config.mode);
+  // Load project registry
+  let registry: ProjectRegistry | null = null;
+  const manifestPath = join(projectRoot, 'claudiv.project.cdml');
+  if (existsSync(manifestPath)) {
+    registry = await loadProject(manifestPath);
+    logger.debug(`Loaded project: ${registry.currentProject}`);
+  }
 
-  // HEADLESS MODE (gen command): Generate once and exit
+  // Load context manifest
+  let contextManifest: ContextManifest | null = null;
+  const contextPath = join(projectRoot, '.claudiv', 'context.cdml');
+  if (existsSync(contextPath)) {
+    contextManifest = await loadContextManifest(contextPath);
+    logger.debug(`Loaded context for: ${contextManifest.forFile}`);
+  }
+
+  // HEADLESS MODE: one-shot processing
   if (isHeadless) {
-    logger.info(`Generating all from ${config.specFile.split('/').pop()}...`);
-
-    // Read and process file once
     const content = await readFile(config.specFile, 'utf-8');
-    const parsed = parseSpecFile(content);
-
-    // Auto-generate all elements (treat as if they all have gen attribute)
-    if (autoGen) {
-      logger.info('Auto-generating all elements...');
-      // Add gen attribute to root element temporarily
-      const rootElement = parsed.dom('*').first();
-      if (rootElement.length > 0) {
-        rootElement.attr(isRetry ? 'retry' : 'gen', '');
-        // Re-parse to detect the pattern
-        const reparsed = parseSpecFile(parsed.dom.html());
-        if (reparsed.chatPatterns.length > 0) {
-          await processChatPattern(reparsed.chatPatterns[0], config, claudeClient, null, reparsed.dom, null, noOutput);
-        }
-      }
-    } else {
-      // Process only elements with gen/retry/undo attributes
-      if (parsed.chatPatterns.length === 0) {
-        logger.warn('No elements with gen/retry/undo attributes found');
-        logger.info('Tip: Run with "claudiv gen" to auto-generate all elements');
-        process.exit(0);
-      }
-
-      for (const pattern of parsed.chatPatterns) {
-        await processChatPattern(pattern, config, claudeClient, null as any, parsed.dom, null as any, noOutput);
-      }
-    }
-
-    logger.success('✓ Generation complete!');
+    await processFileChange(
+      config.specFile,
+      content,
+      '',  // no cached version — treat everything as new
+      projectRoot,
+      registry,
+      contextManifest,
+      contextPath,
+      config,
+      isDryRun,
+      scopeFilter
+    );
+    logger.info('Generation complete');
     process.exit(0);
   }
 
-  // DEV MODE (dev command): Start dev server and watch
-  // Create file watcher
-  const watcher = new SpecFileWatcher(config);
+  // WATCH MODE: continuous processing
+  if (isWatch) {
+    // Initial cache population
+    const content = await readFile(config.specFile, 'utf-8');
+    const relPath = basename(config.specFile);
+    cache.set(relPath, content);
 
-  // Start Vite dev server
-  const devServer = new DevServer();
-  await devServer.start();
-  logger.info('');
+    // Check for system components on first load
+    await checkSystemComponents(content, projectRoot);
 
-  // Auto-generate on start if --gen or --retry flags
-  if (autoGen) {
-    logger.info(`Auto-generating on start (${isRetry ? 'retry' : 'gen'} mode)...`);
-    await processSpecFile(config.specFile, config, claudeClient, watcher, devServer, noOutput);
-  }
+    const watcher = chokidar.watch('**/*.cdml', {
+      cwd: projectRoot,
+      persistent: true,
+      ignoreInitial: true,
+      ignored: ['**/node_modules/**', '**/.claudiv/**', '**/claudiv.project.cdml'],
+      awaitWriteFinish: { stabilityThreshold: config.debounceMs, pollInterval: 50 },
+    });
 
-  // Handle file changes
-  watcher.on('change', async (filePath: string) => {
-    try {
-      await processSpecFile(filePath, config, claudeClient, watcher, devServer, noOutput);
-    } catch (error) {
-      const err = error as Error;
-      logger.error(`Error processing ${filePath}: ${err.message}`);
-      if (process.env.DEBUG) {
-        console.error(err.stack);
-      }
-    }
-  });
+    logger.info(`Watching for .cdml changes in ${projectRoot}`);
 
-  // Start watching
-  watcher.start();
-
-  logger.success(`✓ Watching ${config.specFile.split('/').pop()} for changes...`);
-  logger.info('💡 Tip: Add gen/retry/undo attribute to any element to trigger AI');
-  logger.info('💡 Example: <create-button gen>Make a blue button</create-button>');
-  logger.info('💡 Example: <my-button color="blue" size="large" gen />');
-  logger.info('');
-
-  // Handle graceful shutdown
-  const shutdown = async () => {
-    logger.info('\n👋 Shutting down...');
-    watcher.stop();
-    await devServer.stop();
-    process.exit(0);
-  };
-
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
-}
-
-/**
- * Process .cdml file for chat patterns
- */
-async function processSpecFile(
-  filePath: string,
-  config: any,
-  claudeClient: any,
-  watcher: SpecFileWatcher | null,
-  devServer: DevServer | null,
-  noOutput: boolean = false
-): Promise<void> {
-  // Skip if we're updating the file ourselves (only in watch mode)
-  if (watcher && watcher.isCurrentlyUpdating()) {
-    logger.debug('Skipping processing (internal update in progress)');
-    return;
-  }
-
-  logger.processing(`Processing ${filePath.split('/').pop()}...`);
-
-  // Read file content
-  const content = await readFile(filePath, 'utf-8');
-
-  // Parse spec file
-  const parsed = parseSpecFile(content);
-
-  if (parsed.chatPatterns.length === 0) {
-    logger.debug('No new chat patterns found');
-    return;
-  }
-
-  logger.info(`Found ${parsed.chatPatterns.length} chat pattern(s) to process`);
-
-  // Process each chat pattern
-  for (const pattern of parsed.chatPatterns) {
-    await processChatPattern(pattern, config, claudeClient, watcher, parsed.dom, devServer, noOutput);
-  }
-}
-
-/**
- * Process a single chat pattern
- */
-async function processChatPattern(
-  pattern: ChatPattern,
-  config: any,
-  claudeClient: any,
-  watcher: SpecFileWatcher | null,
-  $: any,
-  devServer: DevServer | null,
-  noOutput: boolean = false
-): Promise<void> {
-  const { action, element, elementName, specAttributes, userMessage, context, elementPath } = pattern;
-
-  // Build display message
-  const attrPreview = Object.entries(specAttributes).length > 0
-    ? ` [${Object.entries(specAttributes).slice(0, 2).map(([k, v]) => `${k}="${v}"`).join(', ')}...]`
-    : '';
-  const messagePreview = userMessage
-    ? userMessage.substring(0, 60) + (userMessage.length > 60 ? '...' : '')
-    : 'attribute-based spec';
-
-  logger.info(`Processing ${action}: <${elementName}${attrPreview}>`);
-  logger.info(`  Message: "${messagePreview}"`);
-  logger.debug(`  Context: ${elementPath}`);
-
-  try {
-    // Read existing code file if it exists (extension depends on target language)
-    const targetExtensions: Record<string, string> = {
-      html: '.html',
-      bash: '.sh',
-      python: '.py',
-      javascript: '.js',
-      typescript: '.ts',
-      go: '.go',
-      rust: '.rs',
-    };
-    const ext = targetExtensions[pattern.target] || '.html';
-    const codeFilePath = config.specFile.replace('.cdml', ext);
-
-    if (existsSync(codeFilePath)) {
-      const existingCode = await readFile(codeFilePath, 'utf-8');
-      context.existingCode = existingCode;
-      logger.debug(`Loaded existing ${pattern.target} code for context`);
-    }
-
-    // Build full prompt combining element name, attributes, user message, and action instructions
-    const fullPrompt = buildFullPrompt($, element, elementName, specAttributes, userMessage, pattern.actionInstructions);
-
-    // Debug: log the prompt to see what's being sent
-    logger.debug('=== FULL PROMPT BEING SENT ===');
-    logger.debug(fullPrompt);
-    logger.debug('=== END PROMPT ===');
-
-    // Accumulate full response
-    let fullResponse = '';
-
-    // Send to Claude and stream response
-    logger.info('Claude response:');
-    for await (const chunk of claudeClient.sendPrompt(fullPrompt, context)) {
-      fullResponse += chunk;
-      // Stream output to console so user can see progress
-      process.stdout.write(chunk);
-    }
-
-    process.stdout.write('\n\n');
-    logger.success('✓ Response complete');
-
-    // Check if response contains code blocks
-    const codeBlocks = extractCodeBlocks(fullResponse);
-    const hasCode = codeBlocks.length > 0;
-
-    // Generate code file using universal generator (if there's code)
-    let outputFileName: string | undefined;
-
-    if (hasCode && !noOutput) {
-      const generated = await generateCode(fullResponse, pattern, context);
-
-      // Determine output file path
-      const outputFile = config.specFile.replace('.cdml', generated.fileExtension);
-      outputFileName = outputFile.split('/').pop();
-
-      // Write generated code
-      await writeFile(outputFile, generated.code, 'utf-8');
-
-      // Make executable if it's a script
-      if (generated.metadata?.executable) {
-        await chmod(outputFile, 0o755);
-        logger.debug(`Made ${outputFile} executable`);
-      }
-
-      logger.success(`Generated ${pattern.target} code → ${outputFile}`);
-
-      // Set output file on dev server and open in browser (for HTML files, dev mode only)
-      if (devServer && outputFileName && generated.fileExtension === '.html') {
-        devServer.setOutputFile(outputFileName);
-        await devServer.openInBrowser(outputFileName);
-      }
-    } else if (hasCode && noOutput) {
-      logger.info('Code generated but not written (--no-output mode)');
-    }
-
-    // Update spec.html: remove action attribute and add <ai> child with response (watch mode only)
-    if (watcher) {
-      watcher.setUpdating(true);
+    watcher.on('change', async (relativePath) => {
       try {
-        await updateSpecWithResponse($, element, action, fullResponse, config.specFile, hasCode, outputFileName);
-      } finally {
-        watcher.setUpdating(false);
-      }
-    }
+        const filePath = join(projectRoot, relativePath);
+        const newContent = await readFile(filePath, 'utf-8');
+        const oldContent = cache.get(relativePath) || '';
 
-  } catch (error) {
-    const err = error as Error;
-    logger.error(`Failed to process chat pattern: ${err.message}`);
-    throw error;
+        await processFileChange(
+          filePath,
+          newContent,
+          oldContent,
+          projectRoot,
+          registry,
+          contextManifest,
+          contextPath,
+          config,
+          isDryRun,
+          scopeFilter
+        );
+
+        cache.set(relativePath, newContent);
+      } catch (error) {
+        logger.error(`Error: ${(error as Error).message}`);
+      }
+    });
+
+    // Cache new files
+    watcher.on('add', async (relativePath) => {
+      try {
+        const content = await readFile(join(projectRoot, relativePath), 'utf-8');
+        cache.set(relativePath, content);
+      } catch {
+        // Ignore
+      }
+    });
+
+    // Graceful shutdown
+    const shutdown = () => {
+      logger.info('Shutting down...');
+      watcher.close();
+      process.exit(0);
+    };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+
+    return;
+  }
+
+  // Default: one-shot with existing cache
+  const content = await readFile(config.specFile, 'utf-8');
+  await processFileChange(
+    config.specFile,
+    content,
+    '',
+    projectRoot,
+    registry,
+    contextManifest,
+    contextPath,
+    config,
+    isDryRun,
+    scopeFilter
+  );
+}
+
+/**
+ * Process a file change through the transactional pipeline.
+ */
+async function processFileChange(
+  filePath: string,
+  newContent: string,
+  oldContent: string,
+  projectRoot: string,
+  registry: ProjectRegistry | null,
+  contextManifest: ContextManifest | null,
+  contextPath: string,
+  config: any,
+  isDryRun: boolean,
+  scopeFilter?: string
+): Promise<void> {
+  // 1. Diff
+  const diff = diffCdml(oldContent, newContent);
+  if (!diff.hasChanges && oldContent) {
+    logger.debug('No changes detected');
+    return;
+  }
+
+  const changes = getChangedElements(diff);
+  logger.info(`Changes: +${diff.summary.added} -${diff.summary.removed} ~${diff.summary.modified}`);
+
+  // 2. Parse for plan directives and questions
+  const parsed = parseSpecFile(newContent);
+
+  // Handle plan directives
+  if (parsed.hasPlanDirectives) {
+    await handlePlanDirectives(parsed.dom, filePath, projectRoot, config, contextManifest, contextPath);
+  }
+
+  // Handle answered plan:questions
+  if (parsed.hasPlanQuestions) {
+    await handlePlanAnswers(parsed.dom, filePath, contextManifest, contextPath);
+  }
+
+  // 3. Apply scope filter
+  const filteredChanges = scopeFilter
+    ? changes.filter((c: CdmlElementChange) => c.path.includes(scopeFilter))
+    : changes;
+
+  if (filteredChanges.length === 0) {
+    logger.debug('No changes match scope filter');
+    return;
+  }
+
+  // 4. Process each change transactionally
+  for (const change of filteredChanges) {
+    await processChange(change, projectRoot, registry, contextManifest, contextPath, config, isDryRun);
   }
 }
 
 /**
- * Build full prompt from element name, spec attributes, and user message
+ * Process a single change in a transaction.
  */
-function buildFullPrompt(
-  $: cheerio.CheerioAPI,
-  element: Element,
-  elementName: string,
-  specAttributes: Record<string, string>,
-  userMessage: string,
-  actionInstructions?: string
-): string {
-  const parts: string[] = [];
+async function processChange(
+  change: CdmlElementChange,
+  projectRoot: string,
+  registry: ProjectRegistry | null,
+  contextManifest: ContextManifest | null,
+  contextPath: string,
+  config: any,
+  isDryRun: boolean
+): Promise<void> {
+  logger.info(`Processing: <${change.tagName}> [${change.type}] at ${change.path}`);
 
-  // Add action instructions if provided (e.g. gen="use opus 4.6")
-  if (actionInstructions) {
-    parts.push(`Generation Instructions: ${actionInstructions}`);
-    parts.push('');
-  }
-
-  // Add element name as semantic header
-  parts.push(`Element: ${elementName}`);
-  parts.push('');
-
-  // Add spec attributes if any
-  if (Object.keys(specAttributes).length > 0) {
-    parts.push('Specifications:');
-    for (const [key, value] of Object.entries(specAttributes)) {
-      parts.push(`  ${key}: ${value}`);
-    }
-    parts.push('');
-  }
-
-  // Extract nested element specifications directly from the element's children
-  const nestedSpecs = extractNestedSpecifications($, element);
-  if (nestedSpecs.length > 0) {
-    parts.push('NESTED COMPONENTS TO IMPLEMENT:');
-    parts.push('The following components MUST be implemented (do not use placeholder comments):');
-    parts.push('');
-
-    function formatSpec(spec: NestedSpec, indent: string, index: number): void {
-      const prefix = index > 0 ? `${index}. ` : '';
-      const lockStatus = spec.isLocked ? ' [LOCKED - DO NOT REGENERATE]' : '';
-      parts.push(`${indent}${prefix}<${spec.elementName}>${lockStatus}`);
-
-      if (spec.isLocked) {
-        parts.push(`${indent}   ⚠️ This component is LOCKED - keep existing implementation, do NOT regenerate`);
-      }
-
-      if (Object.keys(spec.attributes).length > 0) {
-        parts.push(`${indent}   Attributes:`);
-        for (const [key, value] of Object.entries(spec.attributes)) {
-          parts.push(`${indent}     - ${key}: ${value}`);
-        }
-      }
-
-      if (spec.textContent) {
-        parts.push(`${indent}   Content: ${spec.textContent}`);
-      }
-
-      // Recursively format children
-      if (spec.children && spec.children.length > 0) {
-        parts.push(`${indent}   Contains nested components:`);
-        spec.children.forEach((child, childIndex) => {
-          formatSpec(child, indent + '     ', childIndex + 1);
-        });
-      }
-
-      parts.push('');
-    }
-
-    nestedSpecs.forEach((spec, index) => {
-      formatSpec(spec, '', index + 1);
-    });
-  }
-
-  // Add user message if any
-  if (userMessage) {
-    parts.push('Full Description:');
-    parts.push(userMessage);
-  }
-
-  return parts.join('\n');
-}
-
-interface NestedSpec {
-  elementName: string;
-  attributes: Record<string, string>;
-  textContent: string;
-  hasChildren: boolean;
-  depth: number;
-  isLocked: boolean;
-  children?: NestedSpec[];
-}
-
-function extractNestedSpecifications($: cheerio.CheerioAPI, element: Element): NestedSpec[] {
-  const specs: NestedSpec[] = [];
-
-  function extractRecursive(parentElement: Element, depth: number, parentLocked: boolean): NestedSpec[] {
-    const result: NestedSpec[] = [];
-    const $parent = $(parentElement);
-
-    $parent.children().each((_: number, child: AnyNode) => {
-      if (child.type === 'tag') {
-        const childElement = child as Element;
-        const elementName = childElement.name;
-
-        // Skip <ai> elements (these are AI responses, not specifications)
-        if (elementName === 'ai') {
-          return;
-        }
-
-        const $child = $(childElement);
-        const attrs = childElement.attribs || {};
-
-        // Check lock/unlock status
-        const hasLock = 'lock' in attrs;
-        const hasUnlock = 'unlock' in attrs;
-
-        // Determine if this element is locked:
-        // - If parent is locked and element doesn't have unlock => locked
-        // - If element has lock attribute => locked
-        // - If element has unlock attribute => unlocked (overrides parent lock)
-        const isLocked = hasLock || (parentLocked && !hasUnlock);
-
-        // Extract attributes (exclude lock/unlock/gen/retry/undo as they're control attributes)
-        const attributes: Record<string, string> = {};
-        for (const [key, value] of Object.entries(attrs)) {
-          if (key !== 'lock' && key !== 'unlock' && key !== 'gen' && key !== 'retry' && key !== 'undo') {
-            attributes[key] = value as string;
-          }
-        }
-
-        // Get direct text content (not from children)
-        const textContent = $child.contents()
-          .filter((_: number, node: AnyNode) => node.type === 'text')
-          .text()
-          .trim();
-
-        // Recursively extract children, passing down the locked state
-        const children = extractRecursive(childElement, depth + 1, isLocked);
-        const hasChildren = children.length > 0;
-
-        result.push({
-          elementName,
-          attributes,
-          textContent,
-          hasChildren,
-          depth,
-          isLocked,
-          children: hasChildren ? children : undefined,
-        });
-      }
-    });
-
-    return result;
-  }
+  // BEGIN TRANSACTION
+  const preState = contextManifest
+    ? JSON.parse(JSON.stringify(contextManifest))
+    : null;
 
   try {
-    // Check if the root element (the one with gen/retry/undo) has a lock attribute
-    // If it does, all its children are locked by default (unless they have unlock)
-    const rootAttrs = element.attribs || {};
-    const rootHasLock = 'lock' in rootAttrs;
+    // 1. Assemble context
+    if (!contextManifest) {
+      logger.debug('No context manifest — minimal processing');
+      return;
+    }
 
-    specs.push(...extractRecursive(element, 0, rootHasLock));
+    const assembled = await assembleContext(
+      change,
+      change.path,
+      contextManifest,
+      registry,
+      projectRoot
+    );
+
+    if (isDryRun) {
+      logger.info(`Dry run — prompt: ${assembled.prompt.length} chars`);
+      logger.info('Prompt preview:');
+      console.log(assembled.prompt.substring(0, 500) + '...');
+      return;
+    }
+
+    // 2. Execute headless Claude
+    const result = await executeClaudeHeadless(assembled, {
+      mode: config.mode,
+      apiKey: config.apiKey,
+      timeoutMs: config.claudeTimeout,
+    });
+
+    if (!result.success) {
+      throw new Error(`Claude execution failed: ${result.error}`);
+    }
+
+    logger.info(`Generated (${result.durationMs}ms)`);
+
+    // 3. Output response
+    process.stdout.write(result.response);
+    process.stdout.write('\n');
+
+    // COMMIT: update context manifest with new refs/facts
+    if (contextManifest) {
+      await writeFile(contextPath, serializeContextManifest(contextManifest), 'utf-8');
+    }
   } catch (error) {
-    logger.debug(`Could not parse nested specifications: ${error}`);
+    // ROLLBACK
+    logger.error(`Transaction failed: ${(error as Error).message}`);
+    if (preState && contextManifest) {
+      Object.assign(contextManifest, preState);
+    }
   }
-
-  return specs;
 }
 
-// Start the application
-main().catch((error) => {
-  logger.error(`Fatal error: ${error.message}`);
-  if (process.env.DEBUG) {
-    console.error(error.stack);
+/**
+ * Handle plan directives — propose one-level-deep expansion.
+ */
+async function handlePlanDirectives(
+  $: any,
+  filePath: string,
+  projectRoot: string,
+  config: any,
+  contextManifest: ContextManifest | null,
+  contextPath: string
+): Promise<void> {
+  const directives = detectPlanDirectives($);
+
+  for (const directive of directives) {
+    logger.info(`Plan directive at ${directive.scope}: "${directive.instruction}"`);
+
+    const prompt = buildPlanPrompt(directive);
+
+    const result = await executeClaudeHeadless(
+      {
+        target: directive.instruction,
+        current: {},
+        contracts: [],
+        dependencies: [],
+        constraints: directive.existingChildren,
+        facts: [],
+        changeTargets: [],
+        prompt,
+      },
+      {
+        mode: config.mode,
+        apiKey: config.apiKey,
+        timeoutMs: config.claudeTimeout,
+      }
+    );
+
+    if (result.success) {
+      logger.info(`Plan expansion generated (${result.durationMs}ms)`);
+      process.stdout.write(result.response);
+      process.stdout.write('\n');
+    } else {
+      logger.error(`Plan processing failed: ${result.error}`);
+    }
   }
+}
+
+/**
+ * Handle answered plan:questions — remove block, persist as facts.
+ */
+async function handlePlanAnswers(
+  $: any,
+  filePath: string,
+  contextManifest: ContextManifest | null,
+  contextPath: string
+): Promise<void> {
+  const questions = parsePlanQuestions($);
+
+  if (!allQuestionsAnswered(questions)) {
+    logger.debug('Plan questions not yet fully answered');
+    return;
+  }
+
+  const dateStr = new Date().toISOString().split('T')[0];
+  const facts = questionsToFacts(questions, `plan:${dateStr}`);
+
+  logger.info(`Recording ${facts.length} plan decision(s) as facts`);
+
+  // Persist facts to context manifest
+  if (contextManifest) {
+    contextManifest.global.facts.push(...facts);
+    await writeFile(contextPath, serializeContextManifest(contextManifest), 'utf-8');
+  }
+
+  // Remove <plan:questions> block from .cdml
+  $('plan\\:questions').remove();
+  const updatedContent = $.html();
+  await writeFile(filePath, updatedContent, 'utf-8');
+
+  logger.info('Plan questions processed and removed from .cdml');
+}
+
+/**
+ * Check for system components and create them if needed.
+ */
+async function checkSystemComponents(
+  content: string,
+  projectRoot: string
+): Promise<void> {
+  try {
+    const system = parseSystemCdml(content);
+    if (system.components.length > 0) {
+      logger.info(`System "${system.name}" with ${system.components.length} component(s)`);
+
+      const created = await createSystemComponents(system, projectRoot);
+      for (const file of created) {
+        logger.info(`  Created: ${file}`);
+      }
+    }
+  } catch {
+    // Not a system file — that's fine
+  }
+}
+
+/**
+ * Handle init command — scan project and generate scaffolding.
+ */
+async function handleInit(projectRoot: string): Promise<void> {
+  logger.info('Initializing Claudiv...');
+
+  const claudivDir = join(projectRoot, '.claudiv');
+  if (!existsSync(claudivDir)) {
+    await mkdir(claudivDir, { recursive: true });
+  }
+
+  // Create default context
+  const contextPath = join(claudivDir, 'context.cdml');
+  if (!existsSync(contextPath)) {
+    const name = basename(projectRoot);
+    const context = `<claudiv-context for="${name}.cdml" auto-generated="true">
+  <global>
+    <refs></refs>
+    <facts></facts>
+  </global>
+</claudiv-context>
+`;
+    await writeFile(contextPath, context, 'utf-8');
+    logger.info('Created .claudiv/context.cdml');
+  }
+
+  // Create default config
+  const configPath = join(claudivDir, 'config.json');
+  if (!existsSync(configPath)) {
+    await writeFile(configPath, JSON.stringify({ mode: 'cli' }, null, 2), 'utf-8');
+    logger.info('Created .claudiv/config.json');
+  }
+
+  // Create project manifest
+  const manifestPath = join(projectRoot, 'claudiv.project.cdml');
+  if (!existsSync(manifestPath)) {
+    const name = basename(projectRoot);
+    const manifest = `<project name="${name}">
+  <auto-discover>
+    <directory path="." pattern="*.cdml" />
+  </auto-discover>
+</project>
+`;
+    await writeFile(manifestPath, manifest, 'utf-8');
+    logger.info('Created claudiv.project.cdml');
+  }
+
+  logger.info('Initialization complete');
+}
+
+// Start
+main().catch((error) => {
+  logger.error(`Fatal: ${error.message}`);
   process.exit(1);
 });

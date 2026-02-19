@@ -1,99 +1,80 @@
 /**
  * Claude Code CLI integration via subprocess
  */
-
 import { spawn } from 'child_process';
 import { logger } from './utils/logger.js';
-import type { HierarchyContext } from '@claudiv/core';
 import { buildPromptContext } from '@claudiv/core';
-
 export class ClaudeCLIClient {
-  /**
-   * Send prompt to Claude Code CLI and stream response
-   */
-  async *sendPrompt(
-    userMessage: string,
-    context: HierarchyContext
-  ): AsyncGenerator<string> {
-    logger.processing('Sending request to Claude CLI...');
-
-    // Build full prompt with context
-    const fullPrompt = this.buildPrompt(userMessage, context);
-
-    // Spawn Claude process with --print for non-interactive mode
-    // Unset CLAUDECODE to allow nested invocation
-    const claude = spawn('claude', ['--print', fullPrompt], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        CLAUDECODE: '', // Unset to allow nested sessions
-      },
-    });
-
-    let hasOutput = false;
-
-    // Stream stdout chunks
-    for await (const chunk of claude.stdout) {
-      hasOutput = true;
-      yield chunk.toString('utf-8');
+    /**
+     * Send prompt to Claude Code CLI and stream response
+     */
+    async *sendPrompt(userMessage, context) {
+        logger.processing('Sending request to Claude CLI...');
+        // Build full prompt with context
+        const fullPrompt = this.buildPrompt(userMessage, context);
+        // Spawn Claude process with --print for non-interactive mode
+        // Unset CLAUDECODE to allow nested invocation
+        const claude = spawn('claude', ['--print', fullPrompt], {
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: {
+                ...process.env,
+                CLAUDECODE: '', // Unset to allow nested sessions
+            },
+        });
+        let hasOutput = false;
+        // Stream stdout chunks
+        for await (const chunk of claude.stdout) {
+            hasOutput = true;
+            yield chunk.toString('utf-8');
+        }
+        // Collect errors
+        let errorOutput = '';
+        claude.stderr.on('data', (data) => {
+            errorOutput += data.toString();
+        });
+        // Wait for process to complete
+        const exitCode = await new Promise((resolve) => {
+            claude.on('close', resolve);
+        });
+        if (exitCode !== 0) {
+            logger.error(`Claude CLI exited with code ${exitCode}`);
+            if (errorOutput) {
+                logger.error(`Error output: ${errorOutput}`);
+            }
+            throw new Error(`Claude CLI failed with exit code ${exitCode}`);
+        }
+        if (!hasOutput) {
+            logger.warn('No output received from Claude CLI');
+        }
+        logger.debug('Claude CLI request completed');
     }
-
-    // Collect errors
-    let errorOutput = '';
-    claude.stderr.on('data', (data) => {
-      errorOutput += data.toString();
-    });
-
-    // Wait for process to complete
-    const exitCode = await new Promise<number | null>((resolve) => {
-      claude.on('close', resolve);
-    });
-
-    if (exitCode !== 0) {
-      logger.error(`Claude CLI exited with code ${exitCode}`);
-      if (errorOutput) {
-        logger.error(`Error output: ${errorOutput}`);
-      }
-      throw new Error(`Claude CLI failed with exit code ${exitCode}`);
+    /**
+     * Check if Claude CLI is installed
+     */
+    async checkAvailable() {
+        try {
+            const check = spawn('claude', ['--version'], {
+                env: {
+                    ...process.env,
+                    CLAUDECODE: '', // Unset to allow check
+                },
+            });
+            const exitCode = await new Promise((resolve) => {
+                check.on('close', resolve);
+                check.on('error', () => resolve(null));
+            });
+            return exitCode === 0;
+        }
+        catch (error) {
+            return false;
+        }
     }
-
-    if (!hasOutput) {
-      logger.warn('No output received from Claude CLI');
-    }
-
-    logger.debug('Claude CLI request completed');
-  }
-
-  /**
-   * Check if Claude CLI is installed
-   */
-  async checkAvailable(): Promise<boolean> {
-    try {
-      const check = spawn('claude', ['--version'], {
-        env: {
-          ...process.env,
-          CLAUDECODE: '', // Unset to allow check
-        },
-      });
-
-      const exitCode = await new Promise<number | null>((resolve) => {
-        check.on('close', resolve);
-        check.on('error', () => resolve(null));
-      });
-
-      return exitCode === 0;
-    } catch (error) {
-      return false;
-    }
-  }
-
-  /**
-   * Build prompt with hierarchy context
-   */
-  private buildPrompt(userMessage: string, context: HierarchyContext): string {
-    const contextStr = buildPromptContext(context);
-
-    return `You are an AI assistant helping generate HTML/CSS code from natural language requests.
+    /**
+     * Build prompt with hierarchy context
+     */
+    buildPrompt(userMessage, context) {
+        const contextStr = buildPromptContext(context);
+        return `You are an AI assistant helping generate HTML/CSS code from natural language requests.
 
 ${contextStr}
 
@@ -139,5 +120,5 @@ IMPORTANT:
 - EVERY nested component must be fully implemented, not just mentioned in comments
 
 Please respond now.`;
-  }
+    }
 }
