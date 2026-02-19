@@ -51,7 +51,7 @@
   "author": "Amir Guterman",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/claudiv-ai/claudiv/issues"
+    "url": "https://github.com/claudiv-ai/cli/issues"
   },
   "homepage": "https://claudiv.org",
   "engines": {

@@ -528,6 +528,6 @@ FILE FORMAT
   Context:       .claudiv/context.cdml — reference mapping (auto-generated)
 
 MORE INFO
-  https://github.com/claudiv-ai/claudiv
+  https://github.com/claudiv-ai/cli
 `);
 }
