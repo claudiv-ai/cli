@@ -291,7 +291,8 @@ function cmdDesigner(flags) {
   // Try to find the designer package
   const designerPaths = [
     join(__dirname, '../../designer'),           // monorepo sibling
-    join(__dirname, '../node_modules/@claudiv/designer'), // installed dep
+    join(__dirname, '../node_modules/@claudiv/designer'), // installed as cli dep
+    join(process.cwd(), 'node_modules/@claudiv/designer'), // installed in user project
   ];
 
   let designerRoot = null;
@@ -304,7 +305,7 @@ function cmdDesigner(flags) {
 
   if (!designerRoot) {
     console.error('Designer package not found.');
-    console.log('Install it: pnpm add @claudiv/designer');
+    console.log('Install it: npm install @claudiv/designer');
     process.exit(1);
   }
 
