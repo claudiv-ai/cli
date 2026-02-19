@@ -22,8 +22,7 @@
     "claudiv:init": "claudiv-vite-init"
   },
   "dependencies": {
-    "@anthropic-ai/claude-code": "^1.0.0",
-    "@claudiv/core": "^0.3.1",
+    "@claudiv/core": "^0.3.2",
     "cheerio": "^1.0.0",
     "chokidar": "^5.0.0",
     "domhandler": "^5.0.0",
