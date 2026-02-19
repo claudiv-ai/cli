@@ -1,6 +1,6 @@
 {
   "name": "@claudiv/cli",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Claudiv CLI — Declarative AI Interaction Platform",
   "main": "dist/index.js",
   "type": "module",
