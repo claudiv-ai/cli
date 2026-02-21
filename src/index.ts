@@ -40,6 +40,8 @@ import {
   questionsToFacts,
   buildPlanPrompt,
   generatePlanQuestions,
+  parseResponse,
+  commitFiles,
 } from '@claudiv/core';
 import type {
   ContextManifest,
@@ -299,9 +301,22 @@ async function processChange(
 
     logger.info(`Generated (${result.durationMs}ms)`);
 
-    // 3. Output response
-    process.stdout.write(result.response);
-    process.stdout.write('\n');
+    // 3. Parse response and write files
+    const blocks = parseResponse(result.response);
+    if (blocks.length > 0) {
+      const commit = await commitFiles(blocks, projectRoot);
+      for (const f of commit.written) {
+        logger.info(`Wrote: ${f}`);
+      }
+      if (commit.error) {
+        throw new Error(`File commit failed (rolled back): ${commit.error}`);
+      }
+    } else {
+      // No parseable file blocks — print raw response as fallback
+      logger.info('No file blocks detected in response');
+      process.stdout.write(result.response);
+      process.stdout.write('\n');
+    }
 
     // COMMIT: update context manifest with new refs/facts
     if (contextManifest) {
