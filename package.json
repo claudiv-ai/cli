@@ -1,6 +1,6 @@
 {
   "name": "@claudiv/cli",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Claudiv CLI — Declarative AI Interaction Platform",
   "main": "dist/index.js",
   "type": "module",
@@ -22,7 +22,7 @@
     "claudiv:init": "claudiv-vite-init"
   },
   "dependencies": {
-    "@claudiv/core": "^0.3.2",
+    "@claudiv/core": "^0.3.4",
     "cheerio": "^1.0.0",
     "chokidar": "^5.0.0",
     "domhandler": "^5.0.0",
