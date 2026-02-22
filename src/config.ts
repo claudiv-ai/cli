@@ -12,7 +12,7 @@ import { join, isAbsolute, dirname } from 'path';
 import { logger } from './utils/logger.js';
 
 export interface ClaudivConfig {
-  mode: 'cli' | 'api';
+  mode: 'sdk' | 'api';
   apiKey?: string;
   specFile: string;
   debounceMs: number;
@@ -61,8 +61,8 @@ export function loadConfig(): ClaudivConfig {
     process.env.CLAUDIV_MODE ||
     projectConfig.mode ||
     process.env.MODE ||
-    'cli'
-  ) as 'cli' | 'api';
+    'sdk'
+  ) as 'sdk' | 'api';
 
   // API key
   let apiKey = projectConfig.apiKey || process.env.ANTHROPIC_API_KEY;

@@ -255,7 +255,7 @@ function cmdNewSystem(name, flags) {
 </claudiv-context>
 `;
   writeFileSync(join(claudivDir, 'context.cdml'), contextCdml, 'utf-8');
-  writeFileSync(join(claudivDir, 'config.json'), JSON.stringify({ mode: 'cli' }, null, 2), 'utf-8');
+  writeFileSync(join(claudivDir, 'config.json'), JSON.stringify({ mode: 'sdk' }, null, 2), 'utf-8');
 
   // 5. Generate .gitignore
   writeFileSync(join(targetDir, '.gitignore'), `.claudiv/config.json
