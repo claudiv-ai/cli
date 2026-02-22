@@ -28,6 +28,7 @@ import {
   diffCdml,
   getChangedElements,
   assembleContext,
+  assembleContextBatch,
   parseContextManifest,
   loadContextManifest,
   serializeContextManifest,
@@ -47,6 +48,7 @@ import type {
   ContextManifest,
   ProjectRegistry,
   CdmlElementChange,
+  CdmlDiffResult,
   PlanDirective,
 } from '@claudiv/core';
 import type { ParsedCdml } from '@claudiv/core';
@@ -215,7 +217,6 @@ async function processFileChange(
     return;
   }
 
-  const changes = getChangedElements(diff);
   logger.info(`Changes: +${diff.summary.added} -${diff.summary.removed} ~${diff.summary.modified}`);
 
   // 2. Parse for plan directives and questions
@@ -231,19 +232,37 @@ async function processFileChange(
     await handlePlanAnswers(parsed.dom, filePath, contextManifest, contextPath);
   }
 
-  // 3. Apply scope filter
-  const filteredChanges = scopeFilter
-    ? changes.filter((c: CdmlElementChange) => c.path.includes(scopeFilter))
-    : changes;
+  // 3. Extract actionable batches (implementation modules grouped by component)
+  const batches = extractActionableBatches(diff, newContent);
 
-  if (filteredChanges.length === 0) {
-    logger.debug('No changes match scope filter');
-    return;
-  }
+  if (batches.length > 0) {
+    // Apply scope filter to modules within each batch
+    const filteredBatches = scopeFilter
+      ? batches.map(b => ({
+          ...b,
+          modules: b.modules.filter(m => m.path.includes(scopeFilter)),
+        })).filter(b => b.modules.length > 0)
+      : batches;
 
-  // 4. Process each change transactionally
-  for (const change of filteredChanges) {
-    await processChange(change, projectRoot, registry, contextManifest, contextPath, config, isDryRun);
+    // Process each batch (typically 1 per component)
+    for (const batch of filteredBatches) {
+      await processBatch(batch, projectRoot, registry, contextManifest, contextPath, config, isDryRun);
+    }
+  } else {
+    // Fallback: no <implementation> found, use per-element processing
+    const changes = getChangedElements(diff);
+    const filteredChanges = scopeFilter
+      ? changes.filter((c: CdmlElementChange) => c.path.includes(scopeFilter))
+      : changes;
+
+    if (filteredChanges.length === 0) {
+      logger.debug('No actionable changes to process');
+      return;
+    }
+
+    for (const change of filteredChanges) {
+      await processChange(change, projectRoot, registry, contextManifest, contextPath, config, isDryRun);
+    }
   }
 }
 
@@ -319,6 +338,128 @@ async function processChange(
     }
 
     // COMMIT: update context manifest with new refs/facts
+    if (contextManifest) {
+      await writeFile(contextPath, serializeContextManifest(contextManifest), 'utf-8');
+    }
+  } catch (error) {
+    // ROLLBACK
+    logger.error(`Transaction failed: ${(error as Error).message}`);
+    if (preState && contextManifest) {
+      Object.assign(contextManifest, preState);
+    }
+  }
+}
+
+// ─── Batch Processing ───────────────────────────────────────────
+
+interface ActionableBatch {
+  modules: CdmlElementChange[];
+  implAttributes: Record<string, string>;
+  scopePath: string;
+  fullCdml: string;
+}
+
+function extractActionableBatches(
+  diff: CdmlDiffResult,
+  cdmlContent: string
+): ActionableBatch[] {
+  const batches: ActionableBatch[] = [];
+
+  for (const rootChange of diff.changes) {
+    if (rootChange.type === 'unchanged') continue;
+
+    // Find <implementation> section in children
+    const implChange = rootChange.children?.find(
+      c => c.tagName === 'implementation'
+    );
+    if (!implChange) continue;
+
+    // Find <modules> container
+    const modulesChange = implChange.children?.find(
+      c => c.tagName === 'modules'
+    );
+
+    // Collect modules — either from <modules> container or direct impl children
+    const moduleSource = modulesChange?.children || implChange.children || [];
+    const modules = moduleSource.filter(
+      c => c.type !== 'unchanged' && c.tagName !== 'modules'
+    );
+
+    if (modules.length === 0) continue;
+
+    batches.push({
+      modules,
+      implAttributes: implChange.newAttributes || {},
+      scopePath: rootChange.path,
+      fullCdml: cdmlContent,
+    });
+  }
+
+  return batches;
+}
+
+async function processBatch(
+  batch: ActionableBatch,
+  projectRoot: string,
+  registry: ProjectRegistry | null,
+  contextManifest: ContextManifest | null,
+  contextPath: string,
+  config: any,
+  isDryRun: boolean
+): Promise<void> {
+  const moduleNames = batch.modules.map(m => m.tagName).join(', ');
+  logger.info(`Generating ${batch.modules.length} modules: ${moduleNames}`);
+
+  // BEGIN TRANSACTION
+  const preState = contextManifest
+    ? JSON.parse(JSON.stringify(contextManifest))
+    : null;
+
+  try {
+    const assembled = await assembleContextBatch(
+      batch.modules,
+      batch.implAttributes,
+      batch.fullCdml,
+      batch.scopePath,
+      contextManifest,
+      registry,
+      projectRoot
+    );
+
+    if (isDryRun) {
+      logger.info(`Dry run — prompt: ${assembled.prompt.length} chars`);
+      console.log(assembled.prompt.substring(0, 500) + '...');
+      return;
+    }
+
+    const result = await executeClaudeHeadless(assembled, {
+      mode: config.mode,
+      apiKey: config.apiKey,
+      timeoutMs: config.claudeTimeout,
+    });
+
+    if (!result.success) {
+      throw new Error(`Claude execution failed: ${result.error}`);
+    }
+
+    logger.info(`Generated (${result.durationMs}ms)`);
+
+    const blocks = parseResponse(result.response);
+    if (blocks.length > 0) {
+      const commit = await commitFiles(blocks, projectRoot);
+      for (const f of commit.written) {
+        logger.info(`Wrote: ${f}`);
+      }
+      if (commit.error) {
+        throw new Error(`File commit failed (rolled back): ${commit.error}`);
+      }
+    } else {
+      logger.info('No file blocks detected in response');
+      process.stdout.write(result.response);
+      process.stdout.write('\n');
+    }
+
+    // COMMIT
     if (contextManifest) {
       await writeFile(contextPath, serializeContextManifest(contextManifest), 'utf-8');
     }
